@@ -2,55 +2,47 @@
 import logging
 import uuid
 import asyncio
+import os
+import threading # لاستخدام المسارات المتعددة لتشغيل Flask و Polling معًا
+from flask import Flask, request # استيراد Flask
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters.callback_data import CallbackData
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiohttp import web
-import os # للوصول إلى متغيرات البيئة
+
+OWNER_ID = 1749717270
 
 # --- إعدادات البوت الأساسية ---
-# يفضل الحصول على التوكن من متغيرات البيئة في الإنتاج لأمان أفضل.
-# إذا لم يتم العثور عليه في متغيرات البيئة، سيتم استخدام القيمة المباشرة (للاستخدام الشخصي كما طلبت).
-API_TOKEN = os.getenv("API_TOKEN", "7487838353:AAFmFXZ0PzjeFCz3x6rorCMlN_oBBzDyzEQ")
-OWNER_ID = 1749717270 # معرف المالك
-
-# إعدادات Webhook
-# سيتم الحصول على WEBHOOK_HOST من متغيرات البيئة في Render.
-# تأكد من إضافة متغير بيئة باسم WEBHOOK_HOST في إعدادات Render لتطبيقك.
-WEBHOOK_HOST = os.getenv('WEBHOOK_HOST')
-if not WEBHOOK_HOST:
-    logging.error("WEBHOOK_HOST environment variable is not set. Webhook will not function correctly.")
-    # يمكنك وضع قيمة افتراضية هنا للاختبار المحلي إذا أردت، لكنها غير مستحبة للإنتاج
-    # WEBHOOK_HOST = "http://localhost:8080"
-
-WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+API_TOKEN = "7487838353:AAFmFXZ0PzjeFCz3x6rorCMlN_oBBzDyzEQ" # تم وضع التوكن هنا مباشرة
 
 # إعداد التسجيل (Logging)
 logging.basicConfig(level=logging.INFO)
 
 # تهيئة البوت والـ Dispatcher
+# في aiogram 3.x، يتم تمرير الـ Bot إلى الـ Dispatcher عند الإنشاء
 dp = Dispatcher()
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) # استخدام HTML كوضع افتراضي للتنسيق عبر DefaultBotProperties
 
 # --- تخزين الرسائل (في الذاكرة) ---
-# ملاحظة: ستفقد الرسائل عند إعادة تشغيل البوت. هذا ليس مثاليًا للإنتاج.
+# لتسهيل التشغيل على Pydroid، سنستخدم قاموس في الذاكرة بدلاً من قاعدة بيانات.
+# ملاحظة: ستفقد الرسائل عند إعادة تشغيل البوت.
 message_store = {}
 
 # --- Callback Data (aiogram 3.x with Pydantic v2) ---
+# لتمييز بيانات الأزرار المضمنة، نستخدم الآن تعريف class
 class WhisperCallbackFactory(CallbackData, prefix="whisper"):
     msg_id: str
 
 # --- معالج الأوامر ---
+# استخدام مرشحات الأوامر الجديدة في v3
 @dp.message(CommandStart())
 async def send_welcome_start(message: types.Message):
     """معالج لأمر /start"""
     if message.from_user.id != OWNER_ID:
         logging.info(f"Ignoring /start from non-owner: {message.from_user.id}")
-        return
+        return # Ignore silently
     await send_welcome(message)
 
 @dp.message(Command("help"))
@@ -58,7 +50,7 @@ async def send_welcome_help(message: types.Message):
     """معالج لأمر /help"""
     if message.from_user.id != OWNER_ID:
         logging.info(f"Ignoring /help from non-owner: {message.from_user.id}")
-        return
+        return # Ignore silently
     await send_welcome(message)
 
 async def send_welcome(message: types.Message):
@@ -72,15 +64,17 @@ async def send_welcome(message: types.Message):
         "- `الرسالة العامة` هي النص الذي سيظهر لبقية أعضاء المجموعة عند محاولة قراءة الرسالة.\n"
         "- يجب أن يكون طول الرسالة السرية أقل من 200 حرف، والطول الإجمالي أقل من 255 حرفًا.\n"
         "\nملاحظة: لا تحتاج لإضافة البوت إلى المجموعة لاستخدامه.",
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.MARKDOWN # تحديد وضع التنسيق هنا أيضاً
     )
 
 # --- معالج الاستعلامات المضمنة (Inline Mode) ---
+# نفس طريقة التعريف تعمل في v3
 @dp.inline_query()
 async def inline_whisper_handler(inline_query: types.InlineQuery):
     """معالج للاستعلامات المضمنة لإنشاء رسائل الهمس"""
     if inline_query.from_user.id != OWNER_ID:
         logging.info(f"Ignoring inline query from non-owner: {inline_query.from_user.id}")
+        # Optionally, provide a result indicating the user is not authorized
         result = InlineQueryResultArticle(
             id=str(uuid.uuid4()),
             title="غير مصرح لك",
@@ -88,15 +82,16 @@ async def inline_whisper_handler(inline_query: types.InlineQuery):
             input_message_content=InputTextMessageContent(message_text="عذراً، لا يمكنك استخدام هذا البوت.")
         )
         try:
-            await inline_query.answer(results=[result], cache_time=60)
+            await inline_query.answer(results=[result], cache_time=60) # Cache for a minute
         except Exception as e:
             logging.error(f"Error sending unauthorized message to non-owner {inline_query.from_user.id}: {e}")
-        return
+        return # Stop processing for non-owner
     try:
         query_text = inline_query.query.strip()
         sender_id = str(inline_query.from_user.id)
         sender_username = inline_query.from_user.username.lower() if inline_query.from_user.username else None
 
+        # تحليل النص المدخل
         parts = query_text.split("||")
         if len(parts) != 3:
             result = InlineQueryResultArticle(
@@ -112,6 +107,7 @@ async def inline_whisper_handler(inline_query: types.InlineQuery):
         secret_message = parts[1].strip()
         public_message = parts[2].strip()
 
+        # التحقق من طول الرسائل
         if len(secret_message) >= 200 or len(query_text) >= 255:
             result = InlineQueryResultArticle(
                 id=str(uuid.uuid4()),
@@ -122,6 +118,7 @@ async def inline_whisper_handler(inline_query: types.InlineQuery):
             await inline_query.answer(results=[result], cache_time=1)
             return
 
+        # تنظيف قائمة المستخدمين المستهدفين
         target_users = [user.strip().lower().lstrip("@") for user in target_users_str.split(",") if user.strip()]
         if not target_users:
              result = InlineQueryResultArticle(
@@ -133,34 +130,42 @@ async def inline_whisper_handler(inline_query: types.InlineQuery):
              await inline_query.answer(results=[result], cache_time=1)
              return
 
+        # --- Generate mentions ---
         target_mentions = []
         for user in target_users:
             if user.isdigit():
+                # It's likely a user ID
                 target_mentions.append(f'<a href="tg://user?id={user}">المستخدم {user}</a>')
             else:
-                target_mentions.append(f'@{user}')
+                # Assume it's a username
+                target_mentions.append(f'@{user}') # Add @ back
         mentions_str = ', '.join(target_mentions)
+        # --- End Generate mentions ---
 
+        # إنشاء معرف فريد للرسالة وتخزينها
         msg_id = str(uuid.uuid4())
         message_store[msg_id] = {
             "sender_id": sender_id,
             "sender_username": sender_username,
-            "target_users": target_users,
+            "target_users": target_users, # قائمة بأسماء المستخدمين والمعرفات (صغيرة)
             "secret_message": secret_message,
             "public_message": public_message
         }
         logging.info(f"Stored message {msg_id}: {message_store[msg_id]}")
 
+        # إنشاء الزر المضمن (استخدام builder أسلوب أحدث لكن الطريقة القديمة لا تزال تعمل)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="اظهار الهمسة العامة", callback_data=WhisperCallbackFactory(msg_id=msg_id).pack())]
         ])
 
+        # إنشاء نتيجة الاستعلام المضمن
         result = InlineQueryResultArticle(
             id=msg_id,
             title="رسالة همس جاهزة للإرسال",
             description=f"موجهة إلى: {', '.join(target_users)}",
             input_message_content=InputTextMessageContent(
                 message_text=f"همسة عامة لهذا {mentions_str}\n\nاضغط على الزر أدناه لقراءتها.",
+                # parse_mode=ParseMode.HTML # تم تعيينه كوضع افتراضي للبوت
             ),
             reply_markup=keyboard
         )
@@ -171,16 +176,19 @@ async def inline_whisper_handler(inline_query: types.InlineQuery):
         logging.error(f"Error in inline handler: {e}", exc_info=True)
 
 # --- معالج ردود الأزرار المضمنة (Callback Query) ---
+# استخدام مرشح F السحري لـ callback_data في v3
 @dp.callback_query(WhisperCallbackFactory.filter())
 async def handle_whisper_callback(call: types.CallbackQuery, callback_data: CallbackData):
     """معالج لردود الأزرار المضمنة لعرض الرسالة المناسبة"""
     try:
+        # الوصول إلى البيانات من callback_data يكون كـ object attributes في v3
         msg_id = callback_data.msg_id
         clicker_id = str(call.from_user.id)
         clicker_username = call.from_user.username.lower() if call.from_user.username else None
 
         logging.info(f"Callback received for msg_id: {msg_id} from user: {clicker_id} (@{clicker_username})")
 
+        # استرداد الرسالة من المخزن
         message_data = message_store.get(msg_id)
 
         if not message_data:
@@ -188,6 +196,7 @@ async def handle_whisper_callback(call: types.CallbackQuery, callback_data: Call
             logging.warning(f"Message ID {msg_id} not found in store.")
             return
 
+        # التحقق من صلاحية المستخدم
         is_authorized = False
         if clicker_id == message_data["sender_id"]:
             is_authorized = True
@@ -199,6 +208,7 @@ async def handle_whisper_callback(call: types.CallbackQuery, callback_data: Call
 
         logging.info(f"User {clicker_id} authorization status for msg {msg_id}: {is_authorized}")
 
+        # عرض الرسالة المناسبة
         if is_authorized:
             message_to_show = message_data["secret_message"]
             message_to_show += f"\n\n(ملاحظة بقية الطلاب يشوفون هاي الرسالة مايشوفون الرسالة الفوگ: '{message_data['public_message']}')"
@@ -214,55 +224,31 @@ async def handle_whisper_callback(call: types.CallbackQuery, callback_data: Call
         logging.error(f"Error in callback handler: {e}", exc_info=True)
         await call.answer("حدث خطأ ما أثناء معالجة طلبك.", show_alert=True)
 
-# --- نقطة تشغيل البوت (aiogram v3) باستخدام Webhook ---
-async def on_startup(dispatcher: Dispatcher, bot: Bot):
-    """دالة يتم تشغيلها عند بدء تشغيل التطبيق."""
-    if not WEBHOOK_HOST:
-        logging.error("WEBHOOK_HOST is not set. Skipping webhook setup.")
-        return
+# --- نقطة تشغيل البوت (aiogram v3) ---
+async def start_aiogram_polling():
+    """الدالة التي ستقوم بتشغيل Polling لـ aiogram."""
+    logging.info("بدء تشغيل البوت (aiogram v3) في مسار منفصل...")
+    await dp.start_polling(bot)
 
-    logging.info("جارٍ حذف Webhook القديم (إذا وجد)...")
-    await bot.delete_webhook()
+# --- إعداد تطبيق Flask ---
+app = Flask(__name__)
 
-    logging.info(f"جارٍ إعداد Webhook على: {WEBHOOK_URL}")
-    await bot.set_webhook(WEBHOOK_URL)
-    logging.info("تم إعداد Webhook بنجاح.")
-
-async def on_shutdown(dispatcher: Dispatcher, bot: Bot):
-    """دالة يتم تشغيلها عند إيقاف تشغيل التطبيق."""
-    logging.info("جارٍ حذف Webhook عند إيقاف التشغيل...")
-    await bot.delete_webhook()
-    logging.info("تم حذف Webhook.")
-
-async def main():
-    # تهيئة تطبيق aiohttp
-    app = web.Application()
-    # ربط مسار الويب هوك بمعالج التحديثات من aiogram
-    app.router.add_post(WEBHOOK_PATH, dp.web_hook_handler)
-
-    # تسجيل دوال بدء وإيقاف التشغيل
-    app.on_startup.append(lambda app: on_startup(dp, bot))
-    app.on_shutdown.append(lambda app: on_shutdown(dp, bot))
-
-    # الحصول على المنفذ من متغيرات البيئة (Render يحدد المنفذ)
-    port = int(os.getenv("PORT", 8080))
-    logging.info(f"بدء تشغيل خادم الويب على المنفذ: {port}")
-
-    # بدء خادم الويب
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host='0.0.0.0', port=port)
-    await site.start()
-
-    # ابقِ التطبيق يعمل إلى الأبد
-    while True:
-        await asyncio.sleep(3600)
+@app.route('/')
+def home():
+    """نقطة نهاية بسيطة لتجنب خمول خدمة الويب على Render."""
+    return "Telegram Bot is running and polling!", 200
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("تم إيقاف البوت يدوياً.")
-    finally:
-        logging.info("تم إيقاف البوت.")
+    # تشغيل Polling لـ aiogram في مسار منفصل
+    # يجب استخدام asyncio.run داخل المسار لأنه يتعامل مع الأحداث غير المتزامنة
+    polling_thread = threading.Thread(target=lambda: asyncio.run(start_aiogram_polling()))
+    polling_thread.daemon = True # سيتم إنهاء المسار عند إنهاء التطبيق الرئيسي
+    polling_thread.start()
+
+    # تشغيل تطبيق Flask
+    # Render تحدد المنفذ عبر متغير البيئة PORT
+    port = int(os.environ.get("PORT", 5000)) # استخدام 5000 كمنفذ افتراضي إذا لم يتم تعيين PORT
+    logging.info(f"بدء تشغيل خادم Flask على المنفذ {port}...")
+    app.run(host='0.0.0.0', port=port)
+
 
